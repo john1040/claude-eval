@@ -1,0 +1,44 @@
+name: summarization_quality
+description: Test whether Claude produces concise, accurate summaries
+model: claude-sonnet-4-20250514
+system_prompt: "Summarize the following text in 2-3 sentences. Be concise and accurate."
+
+judge:
+  criteria:
+    - name: accuracy
+      description: "Does the summary capture the key facts without hallucination?"
+      weight: 0.4
+    - name: conciseness
+      description: "Is the summary 2-3 sentences and free of filler?"
+      weight: 0.3
+    - name: completeness
+      description: "Does it cover the most important points?"
+      weight: 0.3
+
+cases:
+  - input: |
+      The James Webb Space Telescope launched on December 25, 2021.
+      It is the largest optical telescope in space, with a 6.5-meter
+      primary mirror. JWST orbits the Sun near the Earth-Sun L2 point,
+      about 1.5 million km from Earth. Its primary goals include
+      observing the first galaxies formed after the Big Bang and
+      characterizing potentially habitable exoplanets.
+    expected_keywords: ["James Webb", "telescope", "2021"]
+
+  - input: |
+      Python 3.12 introduced several performance improvements including
+      a new type system for the interpreter. The release also added
+      f-string improvements allowing nested quotes and backslashes.
+      PEP 709 introduced comprehension inlining for better performance.
+      The release was made available on October 2, 2023.
+    expected_keywords: ["Python 3.12", "performance", "2023"]
+
+  - input: |
+      The European Union's AI Act, passed in March 2024, establishes a
+      risk-based framework for regulating artificial intelligence. It
+      categorizes AI systems into four risk levels: unacceptable,
+      high-risk, limited risk, and minimal risk. High-risk systems
+      must meet requirements for transparency, data quality, and human
+      oversight. The Act bans certain uses like social scoring and
+      real-time biometric surveillance in public spaces.
+    expected_keywords: ["EU", "AI Act", "risk"]
