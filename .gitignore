@@ -4,5 +4,6 @@ __pycache__/
 dist/
 build/
 .env
-results/*.json
+*.log
+results/
 .venv/

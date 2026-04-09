@@ -1,12 +1,10 @@
 """Judge: uses Claude as an LLM-as-judge to score eval responses."""
 
+import asyncio
 import json
 import re
 
-
-def _get_client():
-    from claude_eval.runner import get_client
-    return get_client()
+from claude_eval.runner import get_async_client
 
 
 JUDGE_SYSTEM_PROMPT = """\
@@ -47,22 +45,28 @@ def build_judge_prompt(
         f"- {c['name']}: {c['description']}" for c in criteria
     )
 
-    prompt = f"""## Task Description (System Prompt Being Evaluated)
+    # XML tags prevent content inside one field from injecting instructions
+    # into another section (prompt injection via crafted model responses).
+    prompt = f"""<task_description>
 {system_prompt}
+</task_description>
 
-## User Input
+<user_input>
 {user_input}
+</user_input>
 
-## Model Response
+<model_response>
 {response}
+</model_response>
 
-## Evaluation Criteria
+<evaluation_criteria>
 {criteria_desc}
+</evaluation_criteria>
 """
 
     if expected_keywords:
         kw_str = ", ".join(f'"{k}"' for k in expected_keywords)
-        prompt += f"\n## Expected Keywords\nThe response should mention: {kw_str}\n"
+        prompt += f"\n<expected_keywords>{kw_str}</expected_keywords>\n"
 
     prompt += "\nScore each criterion 1-5. Respond with ONLY valid JSON."
     return prompt
@@ -70,7 +74,6 @@ def build_judge_prompt(
 
 def parse_judge_response(text: str) -> dict:
     """Parse the judge's JSON response, handling markdown fences."""
-    # Strip markdown code fences if present
     cleaned = re.sub(r"```json\s*", "", text)
     cleaned = re.sub(r"```\s*", "", cleaned)
     cleaned = cleaned.strip()
@@ -78,23 +81,22 @@ def parse_judge_response(text: str) -> dict:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        # Fallback: try to find JSON object in the text
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if match:
             return json.loads(match.group())
         raise ValueError(f"Could not parse judge response as JSON:\n{text}")
 
 
-def judge_single(
+async def _judge_single_async(
     client,
-    model: str,
+    judge_model: str,
     system_prompt: str,
     user_input: str,
     response: str,
     criteria: list[dict],
     expected_keywords: list[str] | None = None,
 ) -> dict:
-    """Judge a single case. Returns parsed scores dict."""
+    """Judge one case asynchronously. Returns parsed scores dict."""
     judge_prompt = build_judge_prompt(
         system_prompt=system_prompt,
         user_input=user_input,
@@ -102,60 +104,51 @@ def judge_single(
         criteria=criteria,
         expected_keywords=expected_keywords,
     )
-
-    message = client.messages.create(
-        model=model,
+    message = await client.messages.create(
+        model=judge_model,
         max_tokens=1024,
         system=JUDGE_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": judge_prompt}],
     )
-
     judge_text = "".join(
         block.text for block in message.content if block.type == "text"
     )
     return parse_judge_response(judge_text)
 
 
-def judge_results(
-    model: str,
+async def judge_results_async(
+    judge_model: str,
+    system_prompt: str,
     criteria: list[dict],
     cases: list[dict],
     responses: list[str],
 ) -> list[dict]:
-    """Judge all eval responses and return scored results.
+    """Judge all eval responses in parallel."""
+    client = get_async_client()
+    tasks = [
+        _judge_single_async(
+            client=client,
+            judge_model=judge_model,
+            system_prompt=system_prompt,
+            user_input=case["input"],
+            response=response,
+            criteria=criteria,
+            expected_keywords=case.get("expected_keywords"),
+        )
+        for case, response in zip(cases, responses)
+    ]
 
-    Args:
-        model: Claude model to use as judge.
-        criteria: List of criterion dicts with name, description, weight.
-        cases: Original eval cases (need input + expected_keywords).
-        responses: Model responses to judge.
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    Returns:
-        List of dicts with case info, response, and scores.
-    """
-    client = _get_client()
     results = []
-
-    # We need the system_prompt from the eval, but it's not passed here.
-    # We'll reconstruct context from the case input.
-    for case, response in zip(cases, responses):
-        try:
-            parsed = judge_single(
-                client=client,
-                model=model,
-                system_prompt="(see user input for the original task)",
-                user_input=case["input"],
-                response=response,
-                criteria=criteria,
-                expected_keywords=case.get("expected_keywords"),
-            )
-            scores = parsed.get("scores", {})
-        except (ValueError, json.JSONDecodeError) as e:
-            # If judge fails to return valid JSON, record an error
+    for case, response, raw in zip(cases, responses, raw_results):
+        if isinstance(raw, Exception):
             scores = {
-                c["name"]: {"score": 0, "reason": f"Judge error: {e}"}
+                c["name"]: {"score": 0, "reason": f"Judge error: {raw}"}
                 for c in criteria
             }
+        else:
+            scores = raw.get("scores", {})
 
         results.append({
             "input": case["input"].strip()[:200],
@@ -165,3 +158,16 @@ def judge_results(
         })
 
     return results
+
+
+def judge_results(
+    judge_model: str,
+    system_prompt: str,
+    criteria: list[dict],
+    cases: list[dict],
+    responses: list[str],
+) -> list[dict]:
+    """Synchronous wrapper around judge_results_async."""
+    return asyncio.run(
+        judge_results_async(judge_model, system_prompt, criteria, cases, responses)
+    )
